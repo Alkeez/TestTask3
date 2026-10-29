@@ -1,80 +1,42 @@
-# fastapi-clean-architecture
+# FastAPI Clean Architecture в Kubernetes
 
-## description
-Base FastAPI project for applying general RestAPI Application cases.
+Инфраструктурная обвязка для автоматизации сборки, тестирования и доставки сервиса в Kubernetes-кластер.
 ![openapi-docs](./doc/images/openapi-docs-v2.png)
 
-## concept
-1. Minimal functionality.
-2. Convincing architecture.
-3. Easy to read.
-4. Compatibility.
-5. Versatility.
+## 1. Как пользоваться пайплайном
 
-## base models
-1. user
-2. post [user (1 : n) post]
-3. tag [post (n : n) tag]
+Пайплайн автоматизирован через конфигурацию `.gitlab-ci.yml` и разделен на три стадии: `test`, `build` и `deploy`.
 
-## integrated with
-1. Python3.9+
-2. Fastapi 0.78.0
-3. Database
-   1. MySQL5.7+
-   2. Migration with alembic
-   3. pytest with real DB
-   4. Load with two ways (eager, lazy)
-   5. Modeling with schema (1:1, 1:n, n:n)
-4. dependency-injector
-   1. service-repository pattern
-5. JWT authentication
-   1. role separation each endpoint
-6. Deployment
-   1. container environment(k8s, docker)
-   2. raw WAS(Web Application Server)
+*   **Работа в ветках (Feature-ветки):** 
+    Когда вы открываете **Merge Request (MR)**, автоматически запускается стадия проверок `test`:
+    *   `linting`: Проверка форматирования и стилистики кода линтерами `black` и `flake8`.
+    *   `unit_tests`: Запуск тестов через `pytest`. Пайплайн автоматически поднимает изолированную тестовую базу данных `postgres:15-alpine` внутри GitLab CI (`services`), реализуя режим *"pytest с реальной БД"*.
+    *   *Примечание:* Деплой на этом этапе заблокирован.
+*   **Слияние в main (Dev окружение):**
+    После вливания кода в ветку `main`, пайплайн автоматически собирает Docker-образ с уникальным тегом коммита (`$CI_COMMIT_SHORT_SHA`), отправляет его в Registry и без ручного вмешательства обновляет окружение **Development** в Kubernetes-кластере.
+*   **Релизы (Staging / Prod окружения):**
+    Пайплайн готов к поддержке дополнительных сред и полностью изолирован:
+    *   Выкатка на **Staging** происходит автоматически при создании релиз-кандидат тегов вида `v-*-rc`.
+    *   Выкатка на **Prod** привязана к релизным тегам `v-*` и в целях безопасности требует ручного подтверждения ответственного инженера (кнопка `manual` в интерфейсе).
 
-## commands
-1. db(alembic)
-   1. `alembic upgrade head`: apply every migrations
-   2. `alembic downgrade base`: rollback every migrations
-   3. `alembic revision --autogenerate -m "revision_name"`: create new migration 
-   4. `alembic history`: get alembic revision history
-2. How to migration
-   1. Create or modify models from `app/model/*.py`
-   2. `alembic -x ENV=[dev|stage|prod] revision --autogenerate -m "revision_name"`
-   3. Check auto generated migration file from `app/migrations/versions/*.py`
-   4. `alembic -x ENV=[dev|stage|prod] upgrade head`  
-      If ENV does not exist, it will be applied to the test.
-3. server
-   1. `uvicorn app.main:app --reload`: base
-   2. options
-      1. host: `--host 0.0.0.0`
-      2. port: `--port 8000`
-4. test
-   1. `pytest`: base 
-   2. `pytest --cov=app --cov-report=term-missing`: coverage with stdout
-   3. `pytest --cov=app --cov-report=html`: coverage with html
+---
 
-## sample env
-```dotenv
-# mysql case
-ENV=dev
-DB=mysql
-DB_USER=root
-DB_PASSWORD=qwer1234
-DB_HOST=localhost
-DB_PORT=3306
+## 2. Принятые архитектурные решения и их обоснование
 
-# postgres case
-ENV=dev
-DB=postgresql
-DB_USER=gyu
-DB_PASSWORD=
-DB_HOST=localhost
-DB_PORT=5432
-```
+*   **Оптимизированный Multi-stage Dockerfile:** Сборка разделена на тяжелый этап компиляции (`builder` с зависимостями `build-essential` и `libpq-dev` для сборки бинарных драйверов БД) и легковесный этап запуска (`runner`). В финальный контейнер попадают только чистый Python и скомпилированные библиотеки. Это снижает вес образа, ускоряет время доставки в кластер и минимизирует вектор потенциальных атак.
+*   **Автоматизация миграций на старте подов:** Команда применения миграций `alembic -x ENV=$ENV upgrade head` встроена непосредственно в инструкцию запуска контейнера (`CMD`). Это гарантирует, что структура таблиц в базе данных обновится до того, как веб-сервер `uvicorn` начнет принимать входящий трафик.
+*   **Динамический маппинг СУБД (12-Factor App):** Конфигурация полностью отделена от кода. Манифесты Kubernetes синхронизированы со встроенным в Python-код словарем `ENV_DATABASE_MAPPER`. В зависимости от имени целевого окружения пайплайн через утилиту `envsubst` автоматически создает базу данных с правильным префиксом (`dev-fca`, `stage-fca` или `fca`).
+*   **Точечная настройка Healthchecks:** В ходе анализа Swagger UI приложения было выявлено, что базовым доступным маршрутом является корень `/`. Именно он назначен для Liveness и Readiness проб в Kubernetes, что предотвращает цикличные ложные перезапуски подов со стороны оркестратора.
 
-## references
-1. [FastAPI official docs](https://fastapi.tiangolo.com/)
-2. [alembic official tutorial](https://alembic.sqlalchemy.org/en/latest/tutorial.html)
-3. [Dependency Injector](https://python-dependency-injector.ets-labs.org/)
+---
+
+## 3. Что можно сделать иначе
+
+*   **Шаблонизация через Helm-чарты:** Вместо набора статичных plain-манифестов в папке `k8s/` можно упаковать приложение в единый Helm-чарт. Это позволило бы управлять всем релизом одной командой (`helm upgrade --install`) и гибко переопределять параметры окружений через файлы `values-dev.yaml` и `values-prod.yaml`.
+
+---
+
+## 4. Вопросы к команде разработчиков перед внедрением в реальный проект
+
+1. **Интеграция встроенного CI на GitHub:** В оригинальной кодовой базе присутствует workflow для GitHub Actions (`.github/workflows`), который пытается автоматически форматировать код и делать пуш коммита обратно в репозиторий, из-за чего падает с ошибкой прав `403 (Permission denied to github-actions[bot])`. Планирует ли команда полностью мигрировать на целевой пайплайн GitLab CI, где проверки запускаются в изолированном режиме тестирования без обратной записи в репозиторий?
+2. **Политика отката изменений:** Как должна себя вести система при неудачном релизе? Требуется ли автоматический запуск даунгрейда базы данных при откате версии пода на предыдущий релиз?
